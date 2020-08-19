@@ -2,16 +2,128 @@
  * parsing using state machine in html standard
  * https://html.spec.whatwg.org/#tokenization
 **/
-
+const css = require('css');
 const EOF = Symbol("EOF");
 let currentToken = null;
-let stack = [{type:"document", children:[]}];
+let stack = [{ type: "document", children: [] }];
 let currentTextNode = null;
 
-function emit(token){
-    let top = stack[stack.length-1];
+let rules = [];
+function addCSSRules(text) {
+    var ast = css.parse(text);
+    rules.push(...ast.stylesheet.rules);
+}
 
-    if (token.type === "startTag"){
+function computeCSS(element) {
+    // use slice to duplicate stack array
+    var elements = stack.slice().reverse();
+
+    if (!element.computedStyle) {
+        element.computedStyle = {};
+    }
+
+    for (let rule of rules) {
+        var selectorParts = rule.selectors[0].split(" ").reverse();
+        if (!match(element, selectorParts[0]))
+            continue;
+
+        // check all the parent elements
+        let matched = false;
+        var j = 1;
+        for (var i = 0; i < elements.length; ++i) {
+            if (match(elements[i], selectorParts[j])) {
+                j++;
+            }
+        }
+
+        if (j >= selectorParts.length) {
+            matched = true;
+        }
+        if (matched) {
+            var sp = specificity(rule.selectors[0]);
+            var computedStyle = element.computedStyle;
+            for (var declaration of rule.declarations) {
+                if (!computedStyle[declaration.property]) {
+                    computedStyle[declaration.property] = {};
+                }
+
+                if (!computedStyle[declaration.property].specificity){
+                    computedStyle[declaration.property].value = declaration.value;
+                    computedStyle[declaration.property].specificity = sp;
+                }
+                else if (compare(computedStyle[declaration.property].specificity, sp) < 0){
+                    computedStyle[declaration.property].value = declaration.value;
+                    computedStyle[declaration.property].specificity = sp;
+                }
+
+            }
+
+        }
+    }
+}
+
+//assume simple css selector only
+// one class
+// .a
+// #a
+// div
+function match(element, selector) {
+    // skip text element
+    if (!selector || !element.attributes) return false;
+
+    if (selector.charAt(0) == '#') {
+        var attr = element.attributes.filter(attr => attr.name === 'id');
+        if (attr && attr.value === selector.replace("#", "")) {
+            return true;
+        }
+    }
+    else if (selector.charAt(0) == '.') {
+        var attr = element.attributes.fileter(attr => attr.name === 'class');
+        if (attr && attr.value === selector.replace(".", "")) {
+            return true;
+        }
+    }
+    else {
+        if (element.tagName === selector) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function specificity(selector){
+    var p = [0,0,0,0];
+    var selectorParts = selector.split(" ");
+    for (var part of selectorParts) {
+        if (part.charAt(0) === '#'){
+            p[1] += 1;
+        }
+        else if (part.charAt(0) === '.'){
+            p[2] += 1;
+        }
+        else {
+            p[3] += 1;
+        }
+    }
+    return p;
+}
+
+function compare(sp1, sp2){
+    if (sp1[0] - sp2[0]){
+        return sp1[0] - sp2[0];
+    }
+    if (sp1[1] - sp2[1]){
+        return sp1[1] - sp2[1];
+    }
+    if (sp1[2] - sp2[2]){
+        return sp1[2] - sp2[2];
+    }
+    return sp1[3] - sp2[3]
+}
+function emit(token) {
+    let top = stack[stack.length - 1];
+
+    if (token.type === "startTag") {
         let element = {
             type: "element",
             children: [],
@@ -19,14 +131,18 @@ function emit(token){
         };
         element.tagName = token.tagName;
 
-        for (let p in token){
-            if (p !== "type" && p!= "tagName"){
+        for (let p in token) {
+            if (p !== "type" && p != "tagName") {
                 element.attributes.push({
                     name: p,
                     value: token[p]
                 });
             }
         }
+        // CSS information has been gathered
+        // ignore css in the body for recalculation
+        computeCSS(element);
+
         top.children.push(element);
         element.parent = top;
 
@@ -34,132 +150,136 @@ function emit(token){
             stack.push(element);
         currentTextNode = null;
     }
-    else if (token.type === "EndTag"){
-        if (top.tagName != token.tagName){
+    else if (token.type === "EndTag") {
+        if (top.tagName != token.tagName) {
             throw Error("Tag start and end does not match")
         }
         else {
+            //add css rule
+            if (top.tagName === "style") {
+                addCSSRules(top.children[0].content);
+            }
             stack.pop();
         }
         currentTextNode = null;
     }
     else if (token.type === "text") {
-        if (currentTextNode == null){
+        if (currentTextNode == null) {
             currentTextNode = {
                 type: "text",
                 content: ""
             };
             top.children.push(currentTextNode);
         }
-        currentTextNode += token.content;
+        currentTextNode.content += token.content;
     }
 };
 
-function data(c){
-    if (c === '<'){
+function data(c) {
+    if (c === '<') {
         return tagOpen;
     }
-    else if (c === EOF){
+    else if (c === EOF) {
         emit({
-            type:"EOF"
+            type: "EOF"
         });
         return;
     }
     else {
         emit({
-            type:"text",
+            type: "text",
             content: c
         });
         return data;
     }
 }
 
-function tagOpen(c){
+function tagOpen(c) {
     // </ end tag pattern
-    if (c === '/'){
+    if (c === '/') {
         return endTagOpen;
     }
     // any letters <a
     else if (c.match(/^[a-zA-Z]$/)) {
         currentToken = {
             type: "startTag",
-            tagName : ""
+            tagName: ""
         };
         return tagName(c);
     }
-    else{
+    else {
         return;
     }
 }
 
-function endTagOpen(c){
-    if (c.match(/^[a-zA-Z]$/)){
+function endTagOpen(c) {
+    if (c.match(/^[a-zA-Z]$/)) {
         currentToken = {
             type: "EndTag",
-            tagName : ""
+            tagName: ""
         };
         return tagName(c);
     }
-    else if (c === '>'){
+    else if (c === '>') {
     }
-    else if (c === EOF){
+    else if (c === EOF) {
 
     }
 }
 
-function tagName(c){
+function tagName(c) {
     // <html <insert attribute here>
-    if (c.match(/^[\n\t\f ]$/)){
+    if (c.match(/^[\n\t\f ]$/)) {
         return beforeAttributeName;
     }
-    else if (c === '/'){
+    else if (c === '/') {
         return selfClosingTag;
     }
-    else if (c.match(/^[a-zA-Z]$/)){
+    else if (c.match(/^[a-zA-Z]$/)) {
         currentToken.tagName += c.toLowerCase();
         return tagName;
     }
-    else if (c === '>'){
+    else if (c === '>') {
         emit(currentToken);
         return data;
     }
-    else{
+    else {
         return tagName;
     }
 }
 
 //<html ...
-function beforeAttributeName(c){
-    if (c.match(/^[\n\t\f ]$/)){
+function beforeAttributeName(c) {
+    if (c.match(/^[\n\t\f ]$/)) {
         return beforeAttributeName;
     }
-    else if (c === '>' || c === '/' || c=== EOF){
+    else if (c === '>' || c === '/' || c === EOF) {
         return afterAttributeName(c);
     }
-    else if (c === '='){
+    else if (c === '=') {
         // error
     }
     else {
         currentAttribute = {
-            name:"",
-            value:""
+            name: "",
+            value: ""
         }
         return attributeName(c);
     }
 }
 
-function attributeName(c){
+function attributeName(c) {
     //<div class="abc"> 
-    if (c.match(/^[/n/t/f ]$/) || c==='/' || c==='>' || c===EOF){
+    if (c.match(/^[\n\t\f ]$/) || c === '/' || c === '>' || c === EOF) {
         return afterAttributeName(c);
     }
-    else if (c === '='){
-        return beforeAttributeValue; 
+    else if (c === '=') {
+        return beforeAttributeValue;
     }
-    else if (c==='\u0000'){
+    else if (c === '\u0000') {
 
     }
-    else if (c==="\"" || c==="'" || c==="<"){
+    else if (c === "\"" || c === "'" || c === "<") {
 
     }
     else {
@@ -168,112 +288,137 @@ function attributeName(c){
     }
 }
 
-
-function beforeAttributeValue(c){
-    if (c.match(/^[/n/t/f ]$/) || c==='/' || c==='>' || c===EOF){
+function afterAttributeName(c) {
+    if (c.match(/^[\n\t\f ]$/)) {
+        return afterAttributeName;
+    }
+    else if (c === '/') {
+        return selfClosingTag;
+    }
+    else if (c === '=') {
         return beforeAttributeValue;
     }
-    else if (c==="\"")
+    else if (c === '>') {
+        emit(currentToken);
+        return data;
+    }
+    else if (c === EOF) {
+
+    }
+    else {
+        currentAttribute = {
+            name: "",
+            value: ""
+        }
+        return attributeName(c);
+    }
+}
+
+function beforeAttributeValue(c) {
+    if (c.match(/^[\n\t\f ]$/) || c === '/' || c === '>' || c === EOF) {
+        return beforeAttributeValue;
+    }
+    else if (c === "\"")
         return doubleQuotedAttributeValue;
-    else if (c==="\'")
+    else if (c === "\'")
         return singleQuotedAttributeValue;
-    else if (c==='>'){
+    else if (c === '>') {
         //return data
     }
-    else{
+    else {
         return unquotedAttributeValue(c);
     }
 }
 
-function doubleQuotedAttributeValue(c){
-    if (c==="\""){
+function doubleQuotedAttributeValue(c) {
+    if (c === "\"") {
         currentToken[currentAttribute.name] = currentAttribute.value;
         return afterQuotedAttributeValue;
     }
-    else if (c==='\u0000'){
+    else if (c === '\u0000') {
 
     }
-    else if (c===EOF){
+    else if (c === EOF) {
 
     }
-    else{
+    else {
         currentAttribute.value += c;
         return doubleQuotedAttributeValue;
     }
 }
 
-function singleQuotedAttributeValue(c){
-    if (c==="\'"){
+function singleQuotedAttributeValue(c) {
+    if (c === "\'") {
         currentToken[currentAttribute.name] = currentAttribute.value;
         return afterQuotedAttributeValue;
     }
-    else if (c==='\u0000'){
+    else if (c === '\u0000') {
 
     }
-    else if (c===EOF){
+    else if (c === EOF) {
 
     }
-    else{
+    else {
         currentAttribute.value += c;
         return singleQuotedAttributeValue;
     }
 }
 
-function unquotedAttributeValue(c){
-    if (c.match(/^[/n/t/f ]$/) || c==='/' || c==='>' || c===EOF){
+function unquotedAttributeValue(c) {
+    if (c.match(/^[\n\t\f ]$/) || c === '/' || c === EOF) {
         currentToken[currentAttribute.name] = currentAttribute.value;
         return beforeAttributeValue;
     }
-    else if (c==="/"){
+    else if (c === "/") {
         currentToken[currentAttribute.name] = currentAttribute.value;
         return selfClosingTag;
     }
-    else if (c==='>'){
+    else if (c === '>') {
         currentToken[currentAttribute.name] = currentAttribute.value;
-        emit(token);
+        emit(currentToken);
         return data;
     }
-    else if (c==='\u0000'){
+    else if (c === '\u0000') {
 
     }
-    else if (c==='\"' || c==="'" || c==="<" || c==="=" || c==="`"){
+    else if (c === '\"' || c === "'" || c === "<" || c === "=" || c === "`") {
 
     }
-    else if (c===EOF){
+    else if (c === EOF) {
 
     }
-    else{
+    else {
         currentAttribute.value += c;
         return unquotedAttributeValue;
     }
 }
 
 
-function afterQuotedAttributeValue(c){
-    if (c.match(/^[/n/t/f ]$/)){
+function afterQuotedAttributeValue(c) {
+    if (c.match(/^[\n\t\f ]$/)) {
         return beforeAttributeValue;
     }
-    else if (c === '/'){
+    else if (c === '/') {
         return selfClosingTag;
     }
-    else if (c === '>'){
+    else if (c === '>') {
         emit(currentToken);
         return data;
     }
-    else if (c === EOF){
+    else if (c === EOF) {
 
     }
     else {
         return beforeAttributeName(c);
     }
 }
-function selfClosingTag(c){
-    if (c==='>'){
+function selfClosingTag(c) {
+    if (c === '>') {
         currentToken.isSelfClosing = true;
         emit(currentToken);
         return data;
     }
-    else if (c === "EOF"){
+    else if (c === "EOF") {
 
     }
     else {
@@ -283,11 +428,13 @@ function selfClosingTag(c){
 
 
 
-module.exports.parseHTML = function parseHTML(html){
+module.exports.parseHTML = function parseHTML(html) {
     let state = data;
-
-    for (let c of html){
+    let deg = "";
+    for (let c of html) {
+        deg += c;
         state = state(c);
+
     }
     //force to terminate
     state = state(EOF);
