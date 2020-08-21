@@ -4,6 +4,7 @@
 **/
 const css = require('css');
 const EOF = Symbol("EOF");
+const layout = require('./layout.js');
 let currentToken = null;
 let stack = [{ type: "document", children: [] }];
 let currentTextNode = null;
@@ -71,15 +72,16 @@ function match(element, selector) {
     // skip text element
     if (!selector || !element.attributes) return false;
 
+    // only has one attribute
     if (selector.charAt(0) == '#') {
         var attr = element.attributes.filter(attr => attr.name === 'id');
-        if (attr && attr.value === selector.replace("#", "")) {
+        if (attr[0] && attr[0].value === selector.replace("#", "")) {
             return true;
         }
     }
     else if (selector.charAt(0) == '.') {
-        var attr = element.attributes.fileter(attr => attr.name === 'class');
-        if (attr && attr.value === selector.replace(".", "")) {
+        var attr = element.attributes.filter(attr => attr.name === 'class');
+        if (attr[0] && attr[0].value === selector.replace(".", "")) {
             return true;
         }
     }
@@ -144,7 +146,7 @@ function emit(token) {
         computeCSS(element);
 
         top.children.push(element);
-        element.parent = top;
+        //element.parent = top;
 
         if (!token.isSelfClosing)
             stack.push(element);
@@ -159,6 +161,7 @@ function emit(token) {
             if (top.tagName === "style") {
                 addCSSRules(top.children[0].content);
             }
+            layout(top);
             stack.pop();
         }
         currentTextNode = null;
